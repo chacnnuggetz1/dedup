@@ -41,7 +41,7 @@
   header {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 10px;
     padding: 10px 16px;
     border-bottom: 1px solid var(--line);
     background: var(--bg-raised);
@@ -64,7 +64,6 @@
 
   .fps-field {
     display: flex; align-items: center; gap: 6px;
-    margin-left: auto;
     color: var(--text-dim);
     font-size: 13px;
   }
@@ -88,13 +87,26 @@
     cursor: pointer;
   }
   .file-btn:hover { border-color: var(--text-dim); }
+  .file-btn.active {
+    background: var(--line);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
   #fileInput { display: none; }
+
+  .header-right {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
 
   main {
     flex: 1;
     display: flex;
     flex-direction: column;
     min-height: 0;
+    position: relative;
   }
 
   .stage {
@@ -131,7 +143,7 @@
   .frame-badge {
     position: absolute;
     top: 10px; left: 10px;
-    background: rgba(16,18,20,0.75);
+    background: rgba(16,18,20,0.85);
     border: 1px solid var(--line);
     border-radius: var(--radius);
     padding: 5px 10px;
@@ -139,6 +151,7 @@
     display: flex;
     gap: 10px;
     align-items: center;
+    z-index: 10;
   }
   .frame-badge .kept-flag {
     color: var(--accent);
@@ -213,7 +226,7 @@
     color: var(--text);
     border-radius: var(--radius);
     font-size: 14px;
-    padding: 14px 8px;
+    padding: 12px 8px;
     min-height: 56px;
     cursor: pointer;
     display: flex;
@@ -287,6 +300,24 @@
   }
   .overlay-card h2 { margin: 0 0 6px; font-size: 16px; }
   .overlay-card p { margin: 0 0 16px; color: var(--text-dim); font-size: 13px; }
+  
+  /* Progress Bar Styles */
+  .progress-bar-wrap {
+    width: 100%;
+    height: 12px;
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+    margin: 12px 0;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width 0.15s linear;
+  }
+
   .progress-count { font-size: 12px; color: var(--text-dim); margin-bottom: 18px; word-break: break-word; }
   .overlay-card video { width: 100%; border-radius: 6px; margin-bottom: 14px; background: #000; }
   .result-actions { display: flex; gap: 8px; }
@@ -311,6 +342,7 @@
   #debugPanel {
     border-top: 1px solid var(--line);
     background: #0c0d0f;
+    display: none; /* Off by default */
   }
   #debugHeader {
     display: flex;
@@ -343,9 +375,68 @@
     word-break: break-word;
   }
 
+  /* Desktop Adjustments */
   @media (min-width: 720px) {
     .controls button { min-height: 64px; font-size: 15px; }
     .controls button .glyph { font-size: 24px; }
+  }
+
+  /* Mobile UI Layout Optimization */
+  @media (max-width: 640px) {
+    header { padding: 8px 12px; gap: 8px; }
+    header h1 { font-size: 14px; }
+    
+    .stage {
+      min-height: 260px;
+    }
+    
+    /* Reposition Play button to top-right corner of stage area on mobile */
+    .controls button.play {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 46px;
+      height: 46px;
+      min-height: 46px;
+      flex: none;
+      border-radius: 50%;
+      background: rgba(29, 32, 36, 0.88);
+      backdrop-filter: blur(6px);
+      border: 1px solid var(--focus);
+      z-index: 15;
+      padding: 0;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    }
+    .controls button.play .label { display: none; }
+    .controls button.play .glyph { font-size: 18px; }
+
+    /* Rearrange remaining controls for thumb-friendly navigation */
+    .controls {
+      display: flex;
+      gap: 10px;
+      padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+    }
+    .controls button.nav {
+      flex: 1;
+      min-height: 62px;
+    }
+    .controls button.nav .glyph {
+      font-size: 32px; /* Bigger arrow guys */
+      font-weight: bold;
+    }
+    .controls button.keep {
+      flex: 1.8;
+      min-height: 62px;
+      font-size: 15px;
+    }
+    .controls button.keep .glyph {
+      font-size: 22px;
+    }
+
+    .timeline-side-panel {
+      width: 70px;
+      padding: 4px;
+    }
   }
 </style>
 </head>
@@ -356,9 +447,12 @@
   <h1>Frame Dedupe</h1>
   <button class="file-btn" id="pickFileBtn">Upload video</button>
   <input type="file" id="fileInput" accept="video/*">
-  <div class="fps-field">
-    <span id="fpsStatus" class="mono">fps</span>
-    <input type="number" id="fpsInput" value="30" min="1" max="120" step="0.01">
+  <div class="header-right">
+    <div class="fps-field">
+      <span id="fpsStatus" class="mono">fps</span>
+      <input type="number" id="fpsInput" value="30" min="1" max="120" step="0.01">
+    </div>
+    <button class="file-btn" id="toggleDebugBtn">Diagnostics</button>
   </div>
 </header>
 
@@ -423,6 +517,9 @@
     <div id="renderState">
       <h2>Rendering clean video</h2>
       <p id="renderSub">Exporting with the FFmpeg engine…</p>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="renderProgressBar"></div>
+      </div>
       <div class="progress-count mono" id="progressCount">Initializing...</div>
       <div class="result-actions">
         <button id="cancelRenderBtn">Cancel</button>
@@ -481,12 +578,15 @@
   const renderState = document.getElementById('renderState');
   const resultState = document.getElementById('resultState');
   const progressCount = document.getElementById('progressCount');
+  const renderProgressBar = document.getElementById('renderProgressBar');
   const cancelRenderBtn = document.getElementById('cancelRenderBtn');
   const closeResultBtn = document.getElementById('closeResultBtn');
   const downloadLink = document.getElementById('downloadLink');
   const resultVideo = document.getElementById('resultVideo');
   const resultSub = document.getElementById('resultSub');
 
+  const debugPanel = document.getElementById('debugPanel');
+  const toggleDebugBtn = document.getElementById('toggleDebugBtn');
   const debugLog = document.getElementById('debugLog');
   const copyDebugBtn = document.getElementById('copyDebugBtn');
   const clearDebugBtn = document.getElementById('clearDebugBtn');
@@ -496,6 +596,14 @@
     debugLog.textContent += '[' + t + '] ' + msg + '\n';
     debugLog.scrollTop = debugLog.scrollHeight;
   }
+
+  // Diagnostics Panel Toggle
+  toggleDebugBtn.addEventListener('click', () => {
+    const isHidden = debugPanel.style.display === 'none' || getComputedStyle(debugPanel).display === 'none';
+    debugPanel.style.display = isHidden ? 'block' : 'none';
+    toggleDebugBtn.classList.toggle('active', isHidden);
+  });
+
   window.addEventListener('error', (e) => {
     dlog('UNCAUGHT JS ERROR: ' + e.message + (e.filename ? (' @ ' + e.filename + ':' + e.lineno) : ''));
   });
@@ -844,16 +952,6 @@
     });
   }
 
-  // ---- ffmpeg.wasm (single-threaded core — no COOP/COEP headers needed) ----
-  // The main-thread orchestration script (ffmpeg.js) loads fine as a plain
-  // UMD <script>. The worker it spins up is a different story: without
-  // classWorkerURL it builds a worker URL relative to wherever ffmpeg.js
-  // itself was loaded from (the CDN) — and browsers refuse to construct a
-  // Worker whose script lives on a different origin than the page. Setting
-  // classWorkerURL (confirmed directly from the published 0.12.10 source)
-  // fixes that, but it switches the worker to ES-module type, which can
-  // only `import()` ES-module-formatted files — so the core files handed
-  // to it must be the ESM build, not UMD.
   const FFMPEG_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
   const FFMPEG_UTIL_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js';
   const CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
@@ -1039,11 +1137,20 @@
     renderState.style.display = 'block';
     resultState.style.display = 'none';
     progressCount.textContent = 'Initializing engine...';
+    renderProgressBar.style.width = '0%';
+
+    let ffmpeg = null;
+    const onProgress = ({ progress }) => {
+      const pct = Math.max(0, Math.min(100, Math.round((progress || 0) * 100)));
+      progressCount.textContent = 'Rendering video… ' + pct + '%';
+      renderProgressBar.style.width = pct + '%';
+    };
 
     try {
-      const ffmpeg = await ensureFfmpeg((msg) => { progressCount.textContent = msg; });
-      const { fetchFile } = window.FFmpegUtil;
+      ffmpeg = await ensureFfmpeg((msg) => { progressCount.textContent = msg; });
+      ffmpeg.on('progress', onProgress);
 
+      const { fetchFile } = window.FFmpegUtil;
       const inputName = 'input' + extOf(loadedRawFile.name);
       dlog('runClean: writing input, ' + indices.length + ' frames selected');
       await ffmpeg.writeFile(inputName, await fetchFile(loadedRawFile));
@@ -1055,7 +1162,7 @@
         '-i', inputName,
         '-vf', `select=${selectExpr},setpts=N/FRAME_RATE/TB`,
         '-c:v', 'libx264',
-        '-crf', '0',
+        '-crf', '17',
         '-preset', 'ultrafast',
         '-tune', 'grain',
         '-pix_fmt', 'yuv420p',
@@ -1089,6 +1196,7 @@
       alert('Export failed: ' + (err.message || err));
       overlay.classList.remove('show');
     } finally {
+      if (ffmpeg) ffmpeg.off('progress', onProgress);
       rendering = false;
     }
   }
