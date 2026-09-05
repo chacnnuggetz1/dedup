@@ -375,13 +375,11 @@
     word-break: break-word;
   }
 
-  /* Desktop Adjustments */
   @media (min-width: 720px) {
     .controls button { min-height: 64px; font-size: 15px; }
     .controls button .glyph { font-size: 24px; }
   }
 
-  /* Mobile UI Layout Optimization */
   @media (max-width: 640px) {
     header { padding: 8px 12px; gap: 8px; }
     header h1 { font-size: 14px; }
@@ -510,7 +508,7 @@
   <div class="overlay-card">
     <div id="renderState">
       <h2>Rendering clean video</h2>
-      <p id="renderSub">Exporting with the FFmpeg engine…</p>
+      <p id="renderSub">Exporting with MediaRecorder engine…</p>
       <div class="progress-bar-wrap">
         <div class="progress-bar-fill" id="renderProgressBar"></div>
       </div>
@@ -525,7 +523,7 @@
       <video id="resultVideo" controls></video>
       <div class="result-actions">
         <button id="closeResultBtn">Close</button>
-        <a class="primary" id="downloadLink" download="clean.mp4">Download</a>
+        <a class="primary" id="downloadLink" download="clean.webm">Download</a>
       </div>
     </div>
   </div>
@@ -631,9 +629,8 @@
   let playAnimFrame = null;
   let zoomLevel = 1.0;
 
-  // --- Hold-to-Mark (Continuous Keeping/Removing) Logic ---
   let isHoldingKeep = false;
-  let keepMode = 1; // 1 = keeping, 0 = removing
+  let keepMode = 1;
   let lastMarkedFrame = -1;
 
   function startKeepHold() {
@@ -770,26 +767,10 @@
     return c;
   }
 
-  // Helper: Find standard step interval closest to target pixel spacing (~85px)
   function getRulerInterval(pxPerSec, fps) {
     const intervals = [
-      1 / fps,          // 1 frame
-      2 / fps,          // 2 frames
-      5 / fps,          // 5 frames
-      10 / fps,         // 10 frames
-      15 / fps,         // 15 frames (~0.5s)
-      1,                // 1 second
-      2,                // 2 seconds
-      5,                // 5 seconds
-      10,               // 10 seconds
-      15,               // 15 seconds
-      30,               // 30 seconds
-      60,               // 1 minute
-      120,              // 2 minutes
-      300,              // 5 minutes
-      600,              // 10 minutes
-      1800,             // 30 minutes
-      3600              // 1 hour
+      1 / fps, 2 / fps, 5 / fps, 10 / fps, 15 / fps,
+      1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600
     ];
 
     const targetPx = 85;
@@ -807,7 +788,6 @@
     return best;
   }
 
-  // Helper: Format timecode based on interval scale
   function formatRulerLabel(sec, majorStep, fps) {
     const totalSec = Math.max(0, sec);
     const m = Math.floor(totalSec / 60);
@@ -846,7 +826,6 @@
 
     const frameToX = (f) => ((f - startFrame) / visibleFrameCount) * w;
 
-    // --- Dynamic Ruler Tick Logic ---
     const visibleDurationSec = visibleFrameCount / fps;
     const pxPerSec = w / visibleDurationSec;
     const majorStep = getRulerInterval(pxPerSec, fps);
@@ -888,7 +867,6 @@
       }
     }
 
-    // --- Render Frame Keep Marks ---
     const trackTop = 22;
     const trackHeight = h - trackTop;
     const framesPerPixel = visibleFrameCount / w;
@@ -904,7 +882,6 @@
       tlCtx.fillRect(x, trackTop + (trackHeight * 0.2), 1, trackHeight * 0.6);
     }
 
-    // --- Playhead Needle ---
     const px = frameToX(currentFrame);
     tlCtx.fillStyle = '#6fb3d2';
     tlCtx.fillRect(Math.max(0, px - 1), trackTop, 2, trackHeight);
@@ -915,7 +892,6 @@
     drawTimeline();
   });
 
-  // --- Keyboard & Pointer Event Bindings for Hold-to-Mark ---
   function handleKeyDown(e){
     if (!videoLoaded || rendering) return;
     const tag = document.activeElement && document.activeElement.tagName;
@@ -1250,88 +1226,211 @@
 
   window.addEventListener('resize', drawTimeline);
 
-  async function runClean() {
-    if (isPlaying) pauseVideo();
-    const indices = [];
-    for (let i = 0; i < kept.length; i++) if (kept[i] === 1) indices.push(i);
-    if (indices.length === 0) {
-      alert('No frames marked "keep". Step through and select frames first.');
-      return;
-    }
-    if (!loadedRawFile) {
-      alert('Original video file reference lost. Reload the file.');
-      return;
-    }
+  // Fast export using canvas captureStream + MediaRecorder.
+  // Builds kept segments and plays them sequentially to avoid per-frame seeking.
+  async function exportWithMediaRecorder({ keptArray, outFps = fps, onProgress = null } = {}) {
+    if (!videoLoaded) throw new Error('No video loaded');
 
-    rendering = true;
+    // Build kept segments (consecutive frames)
+    const segments = [];
+    let i = 0;
+    while (i < keptArray.length) {
+      if (keptArray[i] === 1) {
+        let start = i;
+        while (i < keptArray.length && keptArray[i] === 1) i++;
+        let end = i - 1;
+        segments.push({ startFrame: start, endFrame: end });
+      } else {
+        i++;
+      }
+    }
+    if (segments.length === 0) throw new Error('No kept frames to export');
+
+    // Create a visible or hidden canvas sized to video natural size
+    const w = video.videoWidth || 1280;
+    const h = video.videoHeight || 720;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d', { alpha: false });
+
+    // Choose MIME type and high bitrate for quality
+    let mime = 'video/webm;codecs=vp9';
+    if (!MediaRecorder.isTypeSupported(mime)) {
+      mime = 'video/webm;codecs=vp8';
+      if (!MediaRecorder.isTypeSupported(mime)) {
+        mime = 'video/mp4'; // fallback (depends on browser)
+      }
+    }
+    // High bitrate (50 Mbps) to preserve video quality
+    const videoBitsPerSecond = 50_000_000;
+    const stream = canvas.captureStream(outFps);
+    const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond });
+
+    const chunks = [];
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+
+    // UI show overlay
     overlay.classList.add('show');
     renderState.style.display = 'block';
     resultState.style.display = 'none';
-    progressCount.textContent = 'Initializing engine...';
+    progressCount.textContent = 'Starting export…';
     renderProgressBar.style.width = '0%';
 
-    let ffmpeg = null;
-    const onProgress = ({ progress }) => {
-      const pct = Math.max(0, Math.min(100, Math.round((progress || 0) * 100)));
-      progressCount.textContent = 'Rendering video… ' + pct + '%';
-      renderProgressBar.style.width = pct + '%';
+    let processedFrames = 0;
+    const totalKeptFrames = segments.reduce((s, seg) => s + (seg.endFrame - seg.startFrame + 1), 0);
+    let canceled = false;
+
+    cancelRenderBtn.onclick = () => {
+      canceled = true;
+      try { recorder.stop(); } catch(e) {}
+      overlay.classList.remove('show');
+      renderState.style.display = 'block';
+      resultState.style.display = 'none';
     };
 
-    try {
-      ffmpeg = await ensureFfmpeg((msg) => { progressCount.textContent = msg; });
-      ffmpeg.on('progress', onProgress);
+    recorder.start(250); // collect every 250ms
+    const useRVFC = typeof video.requestVideoFrameCallback === 'function';
 
-      const { fetchFile } = window.FFmpegUtil;
-      const inputName = 'input' + extOf(loadedRawFile.name);
-      dlog('runClean: writing input, ' + indices.length + ' frames selected');
-      await ffmpeg.writeFile(inputName, await fetchFile(loadedRawFile));
+    // Helper to draw current displayed frame
+    async function drawCurrentFrame() {
+      try {
+        if (typeof createImageBitmap === 'function') {
+          const bmp = await createImageBitmap(video);
+          ctx.drawImage(bmp, 0, 0, w, h);
+          bmp.close && bmp.close();
+        } else {
+          ctx.drawImage(video, 0, 0, w, h);
+        }
+      } catch (err) {
+        ctx.drawImage(video, 0, 0, w, h);
+      }
+    }
 
-      const selectExpr = indices.map(idx => `eq(n\\,${idx})`).join('+');
-      progressCount.textContent = 'Rendering lossless video...';
+    // Process each segment by playing it and drawing frames until segment end
+    for (let si = 0; si < segments.length; si++) {
+      if (canceled) break;
+      const seg = segments[si];
+      const segStart = Math.max(0, frameTime(seg.startFrame));
+      const segEnd = Math.min(duration, frameTime(seg.endFrame) + (0.5 / outFps));
 
-      const exitCode = await ffmpeg.exec([
-        '-i', inputName,
-        '-vf', `select=${selectExpr},setpts=N/FRAME_RATE/TB`,
-        '-c:v', 'libx264',
-        '-crf', '17',
-        '-preset', 'ultrafast',
-        '-pix_fmt', 'yuv420p',
-        '-an',
-        'clean_output.mp4'
-      ]);
+      await seekTo(segStart);
+      if (canceled) break;
 
-      if (exitCode !== 0) {
-        throw new Error('FFmpeg exited with code ' + exitCode);
+      let stopRequested = false;
+
+      if (useRVFC) {
+        await new Promise((resolve) => {
+          function frameCallback(now, meta) {
+            if (canceled || stopRequested) { resolve(); return; }
+            drawCurrentFrame().catch(()=>{});
+            processedFrames++;
+            if (onProgress) onProgress(processedFrames, totalKeptFrames);
+            if (video.currentTime >= segEnd - (1 / outFps)) {
+              stopRequested = true;
+              video.pause();
+              resolve();
+              return;
+            }
+            video.requestVideoFrameCallback(frameCallback);
+          }
+          const startPromise = video.play();
+          startPromise && startPromise.catch(()=>{});
+          video.requestVideoFrameCallback(frameCallback);
+        });
+      } else {
+        await new Promise((resolve) => {
+          video.play().catch(()=>{});
+          const interval = setInterval(async () => {
+            if (canceled || video.currentTime >= segEnd - (1 / outFps)) {
+              clearInterval(interval);
+              video.pause();
+              resolve();
+              return;
+            }
+            await drawCurrentFrame();
+            processedFrames++;
+            if (onProgress) onProgress(processedFrames, totalKeptFrames);
+          }, 1000 / Math.min(outFps, 30));
+        });
       }
 
-      const data = await ffmpeg.readFile('clean_output.mp4');
-      const blob = new Blob([data.buffer], { type: 'video/mp4' });
-      const url = URL.createObjectURL(blob);
+      const ratio = Math.min(1, processedFrames / totalKeptFrames);
+      progressCount.textContent = `Exporting… ${processedFrames} / ${totalKeptFrames} frames`;
+      renderProgressBar.style.width = (ratio * 100) + '%';
+    }
 
-      resultVideo.src = url;
-      downloadLink.href = url;
-      downloadLink.download = 'clean.mp4';
+    if (!canceled && recorder.state !== 'inactive') {
+      recorder.stop();
+    }
 
-      const sizeMb = (blob.size / (1024 * 1024)).toFixed(1);
-      resultSub.textContent = indices.length + ' frames, ' + fmtTime(indices.length / fps) + ', ' + sizeMb + ' MB (lossless h.264)';
+    await new Promise((resolve) => {
+      const check = () => {
+        if (recorder.state === 'inactive') return resolve();
+        setTimeout(check, 100);
+      };
+      check();
+    });
+
+    overlay.classList.remove('show');
+
+    if (canceled) throw new Error('Export canceled');
+
+    const blob = new Blob(chunks, { type: chunks[0]?.type || mime });
+    const url = URL.createObjectURL(blob);
+    return { blob, url, mime, size: blob.size };
+  }
+
+  // Wire up cleanBtn to export using MediaRecorder
+  cleanBtn.addEventListener('click', async () => {
+    if (isPlaying) pauseVideo();
+    try {
+      if (!kept || !kept.length) { alert('No keep marks'); return; }
+      const totalKept = countKept();
+      if (totalKept === 0) { alert('No frames marked "keep". Step through and select frames first.'); return; }
+
+      rendering = true;
+      cleanBtn.disabled = true;
+      renderState.style.display = 'block';
+      resultState.style.display = 'none';
+      overlay.classList.add('show');
+      progressCount.textContent = 'Preparing export…';
+      renderProgressBar.style.width = '0%';
+
+      const res = await exportWithMediaRecorder({
+        keptArray: kept,
+        outFps: fps,
+        onProgress: (processed, total) => {
+          progressCount.textContent = `Exporting… ${processed} / ${total} frames`;
+          renderProgressBar.style.width = `${Math.round((processed/total)*100)}%`;
+        }
+      });
+
+      const ext = res.mime.includes('webm') ? 'webm' : 'mp4';
+      const sizeMb = (res.size / (1024 * 1024)).toFixed(1);
+
+      resultVideo.src = res.url;
+      downloadLink.href = res.url;
+      downloadLink.download = 'clean.' + ext;
+      resultSub.textContent = totalKept + ' frames, ' + fmtTime(totalKept / fps) + ', ' + sizeMb + ' MB (' + ext.toUpperCase() + ')';
 
       renderState.style.display = 'none';
       resultState.style.display = 'block';
-      dlog('runClean: done, output=' + blob.size + ' bytes');
+      overlay.classList.add('show');
+      dlog('runClean: export complete via MediaRecorder, size=' + res.size + ' bytes');
 
-      try { await ffmpeg.deleteFile(inputName); } catch(e){}
-      try { await ffmpeg.deleteFile('clean_output.mp4'); } catch(e){}
     } catch (err) {
-      dlog('runClean: FAILED: ' + (err && err.message ? err.message : err));
-      alert('Export failed: ' + (err.message || err));
+      if (err && err.message !== 'Export canceled') {
+        dlog('runClean FAILED: ' + (err.message || String(err)));
+        alert('Export failed: ' + (err.message || err));
+      }
       overlay.classList.remove('show');
     } finally {
-      if (ffmpeg) ffmpeg.off('progress', onProgress);
+      cleanBtn.disabled = false;
       rendering = false;
     }
-  }
+  });
 
-  cleanBtn.addEventListener('click', runClean);
   cancelRenderBtn.addEventListener('click', () => { overlay.classList.remove('show'); rendering = false; });
   closeResultBtn.addEventListener('click', () => overlay.classList.remove('show'));
 
