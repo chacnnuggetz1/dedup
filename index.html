@@ -675,4 +675,429 @@
     const framesPerPixel = visibleFrameCount / w;
 
     for (let x=0; x<w; x++){
-      const fStart = Math.floor(startFrame + (x * fram
+      const fStart = Math.floor(startFrame + (x * framesPerPixel));
+      const fEnd = Math.max(fStart + 1, Math.floor(startFrame + ((x + 1) * framesPerPixel)));
+      let anyKept = false;
+      for (let i = fStart; i < fEnd && i < totalFrames; i++){
+        if (kept[i] === 1){ anyKept = true; break; }
+      }
+      tlCtx.fillStyle = anyKept ? '#e8a33d' : '#2c3036';
+      tlCtx.fillRect(x, trackTop + (trackHeight * 0.2), 1, trackHeight * 0.6);
+    }
+
+    const px = frameToX(currentFrame);
+    tlCtx.fillStyle = '#6fb3d2';
+    tlCtx.fillRect(Math.max(0, px - 1), trackTop, 2, trackHeight);
+  }
+
+  zoomSlider.addEventListener('input', (e) => {
+    zoomLevel = parseFloat(e.target.value);
+    drawTimeline();
+  });
+
+  function handleKey(e){
+    if (!videoLoaded || rendering) return;
+    const tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT') return;
+    if (e.code === 'ArrowRight'){ e.preventDefault(); goToFrame(currentFrame+1); }
+    else if (e.code === 'ArrowLeft'){ e.preventDefault(); goToFrame(currentFrame-1); }
+    else if (e.code === 'Space'){ e.preventDefault(); toggleKeep(); }
+    else if (e.code === 'KeyP'){ e.preventDefault(); togglePlay(); }
+  }
+  document.addEventListener('keydown', handleKey);
+
+  prevBtn.addEventListener('click', () => goToFrame(currentFrame-1));
+  nextBtn.addEventListener('click', () => goToFrame(currentFrame+1));
+  playBtn.addEventListener('click', togglePlay);
+  keepBtn.addEventListener('click', toggleKeep);
+  resetBtn.addEventListener('click', () => {
+    if (!confirm('Clear all keep marks?')) return;
+    kept.fill(0);
+    renderFrameUI();
+  });
+
+  let scrubbing = false;
+  function timelineToFrame(clientX){
+    const rect = timelineCanvas.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const visibleFrameCount = totalFrames / zoomLevel;
+    let startFrame = currentFrame - (visibleFrameCount / 2);
+    if (startFrame < 0) startFrame = 0;
+    if (startFrame + visibleFrameCount > totalFrames) startFrame = Math.max(0, totalFrames - visibleFrameCount);
+    return Math.round(startFrame + (ratio * visibleFrameCount));
+  }
+
+  timelineCanvas.addEventListener('pointerdown', (e) => {
+    if (!videoLoaded) return;
+    scrubbing = true;
+    goToFrame(timelineToFrame(e.clientX));
+  });
+  timelineCanvas.addEventListener('pointermove', (e) => {
+    if (!scrubbing) return;
+    goToFrame(timelineToFrame(e.clientX));
+  });
+  window.addEventListener('pointerup', () => scrubbing = false);
+
+  const STANDARD_FPS = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 119.88, 120];
+
+  function snapToStandardFps(raw){
+    let best = raw, bestDiff = Infinity;
+    for (const f of STANDARD_FPS){
+      const diff = Math.abs(f - raw);
+      if (diff < bestDiff){ bestDiff = diff; best = f; }
+    }
+    return (bestDiff / raw) < 0.02 ? best : raw;
+  }
+
+  function detectFps(){
+    return new Promise((resolvePromise) => {
+      if (typeof video.requestVideoFrameCallback !== 'function'){
+        dlog('detectFps: requestVideoFrameCallback unsupported, falling back to manual fps');
+        resolvePromise(null);
+        return;
+      }
+      const samples = [];
+      let cbId = null;
+      let settled = false;
+      const safetyTimeout = setTimeout(() => finish(computeFromSamples(5)), 2500);
+
+      function computeFromSamples(minSamples){
+        if (samples.length < minSamples) return null;
+        const elapsed = samples[samples.length-1] - samples[0];
+        return elapsed > 0 ? snapToStandardFps((samples.length-1)/elapsed) : null;
+      }
+      function finish(result){
+        if (settled) return;
+        settled = true;
+        clearTimeout(safetyTimeout);
+        if (cbId !== null){
+          try { video.cancelVideoFrameCallback(cbId); } catch(e){}
+        }
+        video.pause();
+        resolvePromise(result);
+      }
+      function onFrame(now, metadata){
+        samples.push(metadata.mediaTime);
+        if (samples.length >= 40){
+          finish(computeFromSamples(2));
+          return;
+        }
+        cbId = video.requestVideoFrameCallback(onFrame);
+      }
+
+      video.muted = true;
+      video.currentTime = 0;
+      video.play().then(() => {
+        cbId = video.requestVideoFrameCallback(onFrame);
+      }).catch((e) => { dlog('detectFps: play() rejected: ' + e.message); finish(null); });
+    });
+  }
+
+  function buildFrameTable(detectedFps){
+    fps = detectedFps;
+    duration = video.duration;
+    totalFrames = Math.max(1, Math.floor(duration * fps));
+    kept = new Uint8Array(totalFrames);
+    videoLoaded = true;
+    video.pause();
+    fpsInput.value = (Math.round(fps * 100) / 100);
+    timelineWrap.style.display = 'block';
+    controls.style.display = 'flex';
+    bottomRow.style.display = 'flex';
+    totalDurationEl.textContent = fmtTime(duration) + ' · ' + totalFrames + ' frames @ ' + fps.toFixed(2) + 'fps';
+    tally.classList.add('live');
+  }
+
+  let activeObjectUrl = null;
+
+  function tryLoadVideo(fileOrBlob){
+    return new Promise((resolve, reject) => {
+      const codeNames = {1:'ABORTED', 2:'NETWORK', 3:'DECODE', 4:'SRC_NOT_SUPPORTED'};
+      const url = URL.createObjectURL(fileOrBlob);
+      dlog('tryLoadVideo: blob url created, size=' + (fileOrBlob.size || '?') + ' type=' + (fileOrBlob.type || '?'));
+
+      function cleanup(){
+        video.removeEventListener('error', onError);
+        video.removeEventListener('loadedmetadata', onMeta);
+      }
+      function onError(){
+        cleanup();
+        const err = video.error;
+        const code = err ? err.code : 0;
+        dlog('tryLoadVideo: error event. code=' + code + ' (' + (codeNames[code]||'unknown') + ') readyState=' + video.readyState + ' networkState=' + video.networkState);
+        URL.revokeObjectURL(url);
+        reject(new Error((codeNames[code] || 'unknown') + (err && err.message ? ': ' + err.message : '')));
+      }
+      function onMeta(){
+        cleanup();
+        dlog('tryLoadVideo: loadedmetadata. ' + video.videoWidth + 'x' + video.videoHeight + ', duration=' + video.duration.toFixed(2) + 's');
+        if (!video.videoWidth || !video.videoHeight){
+          URL.revokeObjectURL(url);
+          reject(new Error('no decodable video track'));
+          return;
+        }
+        resolve(url);
+      }
+      video.addEventListener('error', onError, { once: true });
+      video.addEventListener('loadedmetadata', onMeta, { once: true });
+      video.src = url;
+    });
+  }
+
+  // ---- ffmpeg.wasm (single-threaded core — no COOP/COEP headers needed) ----
+  // The main-thread orchestration script (ffmpeg.js) loads fine as a plain
+  // UMD <script>. The worker it spins up is a different story: without
+  // classWorkerURL it builds a worker URL relative to wherever ffmpeg.js
+  // itself was loaded from (the CDN) — and browsers refuse to construct a
+  // Worker whose script lives on a different origin than the page. Setting
+  // classWorkerURL (confirmed directly from the published 0.12.10 source)
+  // fixes that, but it switches the worker to ES-module type, which can
+  // only `import()` ES-module-formatted files — so the core files handed
+  // to it must be the ESM build, not UMD.
+  const FFMPEG_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
+  const FFMPEG_UTIL_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js';
+  const CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+
+  const _scriptCache = {};
+  function loadScriptOnce(src){
+    if (_scriptCache[src]) return _scriptCache[src];
+    _scriptCache[src] = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('could not fetch ' + src));
+      document.head.appendChild(s);
+    });
+    return _scriptCache[src];
+  }
+
+  let ffmpegInstance = null;
+  async function ensureFfmpeg(onStatus){
+    if (ffmpegInstance) return ffmpegInstance;
+    onStatus('Loading FFmpeg engine (one-time download)…');
+    dlog('ensureFfmpeg: loading UMD scripts');
+    await loadScriptOnce(FFMPEG_BASE + '/ffmpeg.js');
+    await loadScriptOnce(FFMPEG_UTIL_URL);
+
+    const { FFmpeg } = window.FFmpegWASM;
+    const { toBlobURL } = window.FFmpegUtil;
+    const ffmpeg = new FFmpeg();
+    ffmpeg.on('log', ({ message }) => dlog('[ffmpeg] ' + message));
+
+    dlog('ensureFfmpeg: fetching core (esm) + worker chunk as blobs');
+    await ffmpeg.load({
+      coreURL: await toBlobURL(CORE_BASE + '/ffmpeg-core.js', 'text/javascript'),
+      wasmURL: await toBlobURL(CORE_BASE + '/ffmpeg-core.wasm', 'application/wasm'),
+      classWorkerURL: await toBlobURL(FFMPEG_BASE + '/814.ffmpeg.js', 'text/javascript'),
+    });
+    dlog('ensureFfmpeg: ffmpeg.wasm ready');
+
+    ffmpegInstance = ffmpeg;
+    return ffmpeg;
+  }
+
+  function extOf(name){
+    const m = /\.[a-zA-Z0-9]+$/.exec(name || '');
+    return m ? m[0] : '.mp4';
+  }
+
+  async function repairContainer(file){
+    dlog('repairContainer: starting');
+    const ffmpeg = await ensureFfmpeg((msg) => { statusText.textContent = msg; });
+    const { fetchFile } = window.FFmpegUtil;
+
+    const onProgress = ({ progress }) => {
+      const pct = Math.max(0, Math.min(100, Math.round((progress || 0) * 100)));
+      statusText.textContent = 'Repairing container… ' + pct + '%';
+    };
+    ffmpeg.on('progress', onProgress);
+    statusText.textContent = 'Repairing container…';
+
+    const inputName = 'input' + extOf(file.name);
+    try {
+      await ffmpeg.writeFile(inputName, await fetchFile(file));
+      await ffmpeg.exec(['-i', inputName, '-c', 'copy', '-movflags', '+faststart', 'output.mp4']);
+      const data = await ffmpeg.readFile('output.mp4');
+      dlog('repairContainer: done, output=' + data.length + ' bytes');
+      return new Blob([data.buffer], { type: 'video/mp4' });
+    } finally {
+      ffmpeg.off('progress', onProgress);
+      try { await ffmpeg.deleteFile(inputName); } catch(e){}
+      try { await ffmpeg.deleteFile('output.mp4'); } catch(e){}
+    }
+  }
+
+  async function postLoadPipeline(){
+    try { await video.play(); video.pause(); } catch(e){ dlog('postLoadPipeline: warm-up play() rejected (usually harmless): ' + e.message); }
+    video.currentTime = 0;
+
+    statusText.textContent = 'Detecting frame rate…';
+    fpsStatus.textContent = 'detecting…';
+    let detected = await detectFps();
+    if (!detected){
+      detected = Math.max(1, Math.min(120, parseFloat(fpsInput.value) || 30));
+      fpsStatus.textContent = 'fps (manual)';
+    } else {
+      fpsStatus.textContent = 'fps (detected)';
+    }
+    dlog('postLoadPipeline: fps=' + detected);
+
+    buildFrameTable(detected);
+    statusBadge.style.display = 'none';
+    frameBadge.style.display = 'flex';
+    await goToFrame(0);
+    dlog('postLoadPipeline: ready, totalFrames=' + totalFrames);
+  }
+
+  async function loadFile(file){
+    if (!file) return;
+    dlog('loadFile: "' + file.name + '" size=' + file.size + ' type=' + (file.type || '(none)'));
+    loadedRawFile = file;
+    videoLoaded = false;
+    if (isPlaying) pauseVideo();
+    if (activeObjectUrl){ URL.revokeObjectURL(activeObjectUrl); activeObjectUrl = null; }
+
+    video.style.display = 'block';
+    emptyState.style.display = 'none';
+    frameBadge.style.display = 'none';
+    statusBadge.style.display = 'flex';
+    statusText.textContent = 'Loading video…';
+    fpsStatus.textContent = 'fps';
+
+    let nativeError = null;
+    try {
+      activeObjectUrl = await tryLoadVideo(file);
+      dlog('loadFile: native playback OK');
+    } catch (err){
+      nativeError = err;
+      dlog('loadFile: native playback failed: ' + err.message);
+    }
+
+    if (nativeError){
+      statusText.textContent = 'Native playback failed — attempting automatic repair…';
+      try {
+        const repaired = await repairContainer(file);
+        activeObjectUrl = await tryLoadVideo(repaired);
+        dlog('loadFile: repaired file loaded OK');
+      } catch (repairErr){
+        dlog('loadFile: repair failed: ' + (repairErr && repairErr.message ? repairErr.message : repairErr));
+        statusText.textContent = 'Could not load this file.';
+        alert(
+          'This video could not be played, even after an automatic in-browser repair attempt.\n\n' +
+          'Native playback error: ' + nativeError.message + '\n' +
+          'Repair attempt error: ' + (repairErr && repairErr.message ? repairErr.message : repairErr) + '\n\n' +
+          'Copy the Diagnostics panel at the bottom of the page for the full detail.'
+        );
+        return;
+      }
+    }
+
+    await postLoadPipeline();
+  }
+
+  fpsInput.addEventListener('change', async () => {
+    if (!videoLoaded) return;
+    const val = Math.max(1, Math.min(120, parseFloat(fpsInput.value) || fps));
+    if (Math.abs(val - fps) < 0.001) return;
+    if (!confirm('Changing the frame rate rebuilds the frame list and clears your keep marks. Continue?')){
+      fpsInput.value = fps.toFixed(2);
+      return;
+    }
+    fpsStatus.textContent = 'fps (manual)';
+    buildFrameTable(val);
+    await goToFrame(0);
+  });
+
+  pickFileBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', (e) => loadFile(e.target.files[0]));
+  dropZone.addEventListener('click', () => fileInput.click());
+  ['dragover','drop'].forEach(evt => {
+    document.addEventListener(evt, (e) => e.preventDefault());
+  });
+  document.addEventListener('drop', (e) => {
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) loadFile(f);
+  });
+
+  window.addEventListener('resize', drawTimeline);
+
+  async function runClean() {
+    if (isPlaying) pauseVideo();
+    const indices = [];
+    for (let i = 0; i < kept.length; i++) if (kept[i] === 1) indices.push(i);
+    if (indices.length === 0) {
+      alert('No frames marked "keep". Step through and select frames first.');
+      return;
+    }
+    if (!loadedRawFile) {
+      alert('Original video file reference lost. Reload the file.');
+      return;
+    }
+
+    rendering = true;
+    overlay.classList.add('show');
+    renderState.style.display = 'block';
+    resultState.style.display = 'none';
+    progressCount.textContent = 'Initializing engine...';
+
+    try {
+      const ffmpeg = await ensureFfmpeg((msg) => { progressCount.textContent = msg; });
+      const { fetchFile } = window.FFmpegUtil;
+
+      const inputName = 'input' + extOf(loadedRawFile.name);
+      dlog('runClean: writing input, ' + indices.length + ' frames selected');
+      await ffmpeg.writeFile(inputName, await fetchFile(loadedRawFile));
+
+      const selectExpr = indices.map(idx => `eq(n\\,${idx})`).join('+');
+      progressCount.textContent = 'Rendering lossless video...';
+
+      const exitCode = await ffmpeg.exec([
+        '-i', inputName,
+        '-vf', `select=${selectExpr},setpts=N/FRAME_RATE/TB`,
+        '-c:v', 'libx264',
+        '-crf', '0',
+        '-preset', 'ultrafast',
+        '-tune', 'grain',
+        '-pix_fmt', 'yuv420p',
+        '-an',
+        'clean_output.mp4'
+      ]);
+
+      if (exitCode !== 0) {
+        throw new Error('FFmpeg exited with code ' + exitCode + ' — see the Diagnostics panel for the [ffmpeg] log lines.');
+      }
+
+      const data = await ffmpeg.readFile('clean_output.mp4');
+      const blob = new Blob([data.buffer], { type: 'video/mp4' });
+      const url = URL.createObjectURL(blob);
+
+      resultVideo.src = url;
+      downloadLink.href = url;
+      downloadLink.download = 'clean.mp4';
+
+      const sizeMb = (blob.size / (1024 * 1024)).toFixed(1);
+      resultSub.textContent = indices.length + ' frames, ' + fmtTime(indices.length / fps) + ', ' + sizeMb + ' MB (lossless h.264)';
+
+      renderState.style.display = 'none';
+      resultState.style.display = 'block';
+      dlog('runClean: done, output=' + blob.size + ' bytes');
+
+      try { await ffmpeg.deleteFile(inputName); } catch(e){}
+      try { await ffmpeg.deleteFile('clean_output.mp4'); } catch(e){}
+    } catch (err) {
+      dlog('runClean: FAILED: ' + (err && err.message ? err.message : err));
+      alert('Export failed: ' + (err.message || err));
+      overlay.classList.remove('show');
+    } finally {
+      rendering = false;
+    }
+  }
+
+  cleanBtn.addEventListener('click', runClean);
+  cancelRenderBtn.addEventListener('click', () => { overlay.classList.remove('show'); rendering = false; });
+  closeResultBtn.addEventListener('click', () => overlay.classList.remove('show'));
+
+})();
+</script>
+</body>
+</html>
