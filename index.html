@@ -308,6 +308,41 @@
     font-weight: 600;
   }
 
+  #debugPanel {
+    border-top: 1px solid var(--line);
+    background: #0c0d0f;
+  }
+  #debugHeader {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    font-size: 11px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--line);
+  }
+  #debugHeader button {
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  #debugHeader .spacer { flex: 1; }
+  #debugLog {
+    margin: 0;
+    padding: 8px 12px;
+    max-height: 140px;
+    overflow-y: auto;
+    font-size: 11px;
+    line-height: 1.5;
+    color: #8fd19e;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
   @media (min-width: 720px) {
     .controls button { min-height: 64px; font-size: 15px; }
     .controls button .glyph { font-size: 24px; }
@@ -373,11 +408,21 @@
   </div>
 </main>
 
+<div id="debugPanel">
+  <div id="debugHeader">
+    <span>Diagnostics</span>
+    <span class="spacer"></span>
+    <button id="copyDebugBtn">Copy</button>
+    <button id="clearDebugBtn">Clear</button>
+  </div>
+  <pre id="debugLog" class="mono"></pre>
+</div>
+
 <div class="overlay" id="overlay">
   <div class="overlay-card">
     <div id="renderState">
       <h2>Rendering clean video</h2>
-      <p id="renderSub">Exporting with FFmpeg engine...</p>
+      <p id="renderSub">Exporting with the FFmpeg engine…</p>
       <div class="progress-count mono" id="progressCount">Initializing...</div>
       <div class="result-actions">
         <button id="cancelRenderBtn">Cancel</button>
@@ -441,6 +486,37 @@
   const downloadLink = document.getElementById('downloadLink');
   const resultVideo = document.getElementById('resultVideo');
   const resultSub = document.getElementById('resultSub');
+
+  const debugLog = document.getElementById('debugLog');
+  const copyDebugBtn = document.getElementById('copyDebugBtn');
+  const clearDebugBtn = document.getElementById('clearDebugBtn');
+
+  function dlog(msg){
+    const t = new Date().toISOString().split('T')[1].replace('Z','');
+    debugLog.textContent += '[' + t + '] ' + msg + '\n';
+    debugLog.scrollTop = debugLog.scrollHeight;
+  }
+  window.addEventListener('error', (e) => {
+    dlog('UNCAUGHT JS ERROR: ' + e.message + (e.filename ? (' @ ' + e.filename + ':' + e.lineno) : ''));
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason;
+    dlog('UNHANDLED PROMISE REJECTION: ' + (r && r.message ? r.message : String(r)));
+  });
+  copyDebugBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(debugLog.textContent).then(() => {
+      copyDebugBtn.textContent = 'Copied';
+      setTimeout(() => copyDebugBtn.textContent = 'Copy', 1200);
+    }).catch(() => {
+      const range = document.createRange();
+      range.selectNodeContents(debugLog);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    });
+  });
+  clearDebugBtn.addEventListener('click', () => { debugLog.textContent = ''; });
+  dlog('Page loaded. UA: ' + navigator.userAgent);
 
   let fps = 30;
   let totalFrames = 0;
@@ -676,6 +752,7 @@
   function detectFps(){
     return new Promise((resolvePromise) => {
       if (typeof video.requestVideoFrameCallback !== 'function'){
+        dlog('detectFps: requestVideoFrameCallback unsupported, falling back to manual fps');
         resolvePromise(null);
         return;
       }
@@ -712,7 +789,7 @@
       video.currentTime = 0;
       video.play().then(() => {
         cbId = video.requestVideoFrameCallback(onFrame);
-      }).catch(() => finish(null));
+      }).catch((e) => { dlog('detectFps: play() rejected: ' + e.message); finish(null); });
     });
   }
 
@@ -737,6 +814,7 @@
     return new Promise((resolve, reject) => {
       const codeNames = {1:'ABORTED', 2:'NETWORK', 3:'DECODE', 4:'SRC_NOT_SUPPORTED'};
       const url = URL.createObjectURL(fileOrBlob);
+      dlog('tryLoadVideo: blob url created, size=' + (fileOrBlob.size || '?') + ' type=' + (fileOrBlob.type || '?'));
 
       function cleanup(){
         video.removeEventListener('error', onError);
@@ -744,13 +822,15 @@
       }
       function onError(){
         cleanup();
-        URL.revokeObjectURL(url);
         const err = video.error;
         const code = err ? err.code : 0;
+        dlog('tryLoadVideo: error event. code=' + code + ' (' + (codeNames[code]||'unknown') + ') readyState=' + video.readyState + ' networkState=' + video.networkState);
+        URL.revokeObjectURL(url);
         reject(new Error((codeNames[code] || 'unknown') + (err && err.message ? ': ' + err.message : '')));
       }
       function onMeta(){
         cleanup();
+        dlog('tryLoadVideo: loadedmetadata. ' + video.videoWidth + 'x' + video.videoHeight + ', duration=' + video.duration.toFixed(2) + 's');
         if (!video.videoWidth || !video.videoHeight){
           URL.revokeObjectURL(url);
           reject(new Error('no decodable video track'));
@@ -760,10 +840,14 @@
       }
       video.addEventListener('error', onError, { once: true });
       video.addEventListener('loadedmetadata', onMeta, { once: true });
-      video.removeAttribute('src');
       video.src = url;
     });
   }
+
+  // ---- ffmpeg.wasm (single-threaded core — no COOP/COEP headers needed) ----
+  const FFMPEG_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
+  const FFMPEG_UTIL_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js';
+  const CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
 
   const _scriptCache = {};
   function loadScriptOnce(src){
@@ -781,25 +865,28 @@
   let ffmpegInstance = null;
   async function ensureFfmpeg(onStatus){
     if (ffmpegInstance) return ffmpegInstance;
-    onStatus('Loading FFmpeg engine…');
+    onStatus('Loading FFmpeg engine (one-time download)…');
+    dlog('ensureFfmpeg: loading UMD scripts');
+    await loadScriptOnce(FFMPEG_BASE + '/ffmpeg.js');
+    await loadScriptOnce(FFMPEG_UTIL_URL);
 
-    // 1. Load the CDN scripts
-    await loadScriptOnce('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js');
-    await loadScriptOnce('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js');
-    
     const { FFmpeg } = window.FFmpegWASM;
     const { toBlobURL } = window.FFmpegUtil;
     const ffmpeg = new FFmpeg();
+    ffmpeg.on('log', ({ message }) => dlog('[ffmpeg] ' + message));
 
-    const CORE_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-    const FFMPEG_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
-
-    // 2. Load the core and the worker as local blobs to bypass GitHub Pages security
+    dlog('ensureFfmpeg: fetching core as blob (' + CORE_BASE + ')');
+    // Only coreURL + wasmURL — do NOT pass classWorkerURL. The library
+    // creates its own worker relative to its own (real, non-blob) script
+    // URL; wrapping that worker itself in a blob URL breaks its own
+    // relative import of ffmpeg-core.js (opaque blob origin has no path
+    // to resolve against), which is what caused the "failed to import
+    // ffmpeg-core.js" error.
     await ffmpeg.load({
-      coreURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
-      classWorkerURL: await toBlobURL(`${FFMPEG_BASE}/814.ffmpeg.js`, 'text/javascript')
+      coreURL: await toBlobURL(CORE_BASE + '/ffmpeg-core.js', 'text/javascript'),
+      wasmURL: await toBlobURL(CORE_BASE + '/ffmpeg-core.wasm', 'application/wasm'),
     });
+    dlog('ensureFfmpeg: ffmpeg.wasm ready');
 
     ffmpegInstance = ffmpeg;
     return ffmpeg;
@@ -811,6 +898,7 @@
   }
 
   async function repairContainer(file){
+    dlog('repairContainer: starting');
     const ffmpeg = await ensureFfmpeg((msg) => { statusText.textContent = msg; });
     const { fetchFile } = window.FFmpegUtil;
 
@@ -826,6 +914,7 @@
       await ffmpeg.writeFile(inputName, await fetchFile(file));
       await ffmpeg.exec(['-i', inputName, '-c', 'copy', '-movflags', '+faststart', 'output.mp4']);
       const data = await ffmpeg.readFile('output.mp4');
+      dlog('repairContainer: done, output=' + data.length + ' bytes');
       return new Blob([data.buffer], { type: 'video/mp4' });
     } finally {
       ffmpeg.off('progress', onProgress);
@@ -835,7 +924,7 @@
   }
 
   async function postLoadPipeline(){
-    try { await video.play(); video.pause(); } catch(e){}
+    try { await video.play(); video.pause(); } catch(e){ dlog('postLoadPipeline: warm-up play() rejected (usually harmless): ' + e.message); }
     video.currentTime = 0;
 
     statusText.textContent = 'Detecting frame rate…';
@@ -847,15 +936,18 @@
     } else {
       fpsStatus.textContent = 'fps (detected)';
     }
+    dlog('postLoadPipeline: fps=' + detected);
 
     buildFrameTable(detected);
     statusBadge.style.display = 'none';
     frameBadge.style.display = 'flex';
     await goToFrame(0);
+    dlog('postLoadPipeline: ready, totalFrames=' + totalFrames);
   }
 
   async function loadFile(file){
     if (!file) return;
+    dlog('loadFile: "' + file.name + '" size=' + file.size + ' type=' + (file.type || '(none)'));
     loadedRawFile = file;
     videoLoaded = false;
     if (isPlaying) pauseVideo();
@@ -871,8 +963,10 @@
     let nativeError = null;
     try {
       activeObjectUrl = await tryLoadVideo(file);
+      dlog('loadFile: native playback OK');
     } catch (err){
       nativeError = err;
+      dlog('loadFile: native playback failed: ' + err.message);
     }
 
     if (nativeError){
@@ -880,9 +974,16 @@
       try {
         const repaired = await repairContainer(file);
         activeObjectUrl = await tryLoadVideo(repaired);
+        dlog('loadFile: repaired file loaded OK');
       } catch (repairErr){
+        dlog('loadFile: repair failed: ' + (repairErr && repairErr.message ? repairErr.message : repairErr));
         statusText.textContent = 'Could not load this file.';
-        alert('This video could not be played.');
+        alert(
+          'This video could not be played, even after an automatic in-browser repair attempt.\n\n' +
+          'Native playback error: ' + nativeError.message + '\n' +
+          'Repair attempt error: ' + (repairErr && repairErr.message ? repairErr.message : repairErr) + '\n\n' +
+          'Copy the Diagnostics panel at the bottom of the page for the full detail.'
+        );
         return;
       }
     }
@@ -924,7 +1025,6 @@
       alert('No frames marked "keep". Step through and select frames first.');
       return;
     }
-
     if (!loadedRawFile) {
       alert('Original video file reference lost. Reload the file.');
       return;
@@ -940,18 +1040,13 @@
       const ffmpeg = await ensureFfmpeg((msg) => { progressCount.textContent = msg; });
       const { fetchFile } = window.FFmpegUtil;
 
-      // Pipe FFmpeg's internal logs directly to your browser console (F12) for debugging
-      ffmpeg.on('log', ({ message }) => console.log(message));
-
       const inputName = 'input' + extOf(loadedRawFile.name);
+      dlog('runClean: writing input, ' + indices.length + ' frames selected');
       await ffmpeg.writeFile(inputName, await fetchFile(loadedRawFile));
 
-      // FIX: Removed the single quotes. We pass the expression completely raw.
       const selectExpr = indices.map(idx => `eq(n\\,${idx})`).join('+');
-      
       progressCount.textContent = 'Rendering lossless video...';
 
-      // Capture the exit code so we know if it actually finishes
       const exitCode = await ffmpeg.exec([
         '-i', inputName,
         '-vf', `select=${selectExpr},setpts=N/FRAME_RATE/TB`,
@@ -965,7 +1060,7 @@
       ]);
 
       if (exitCode !== 0) {
-        throw new Error(`FFmpeg crashed with exit code ${exitCode}. Press F12 and check the Console tab for the exact error.`);
+        throw new Error('FFmpeg exited with code ' + exitCode + ' — see the Diagnostics panel for the [ffmpeg] log lines.');
       }
 
       const data = await ffmpeg.readFile('clean_output.mp4');
@@ -975,19 +1070,19 @@
       resultVideo.src = url;
       downloadLink.href = url;
       downloadLink.download = 'clean.mp4';
-      
+
       const sizeMb = (blob.size / (1024 * 1024)).toFixed(1);
       resultSub.textContent = indices.length + ' frames, ' + fmtTime(indices.length / fps) + ', ' + sizeMb + ' MB (lossless h.264)';
-      
+
       renderState.style.display = 'none';
       resultState.style.display = 'block';
+      dlog('runClean: done, output=' + blob.size + ' bytes');
 
       try { await ffmpeg.deleteFile(inputName); } catch(e){}
       try { await ffmpeg.deleteFile('clean_output.mp4'); } catch(e){}
     } catch (err) {
-      // Safely handle errors even if they don't have a .message property
+      dlog('runClean: FAILED: ' + (err && err.message ? err.message : err));
       alert('Export failed: ' + (err.message || err));
-      console.error(err);
       overlay.classList.remove('show');
     } finally {
       rendering = false;
