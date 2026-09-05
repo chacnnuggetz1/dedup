@@ -765,10 +765,6 @@
     });
   }
 
-  const FFMPEG_JS_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js';
-  const FFMPEG_UTIL_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js';
-  const FFMPEG_CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
-
   const _scriptCache = {};
   function loadScriptOnce(src){
     if (_scriptCache[src]) return _scriptCache[src];
@@ -786,34 +782,24 @@
   async function ensureFfmpeg(onStatus){
     if (ffmpegInstance) return ffmpegInstance;
     onStatus('Loading FFmpeg engine…');
-    await loadScriptOnce(FFMPEG_JS_URL);
-    await loadScriptOnce(FFMPEG_UTIL_URL);
+
+    // 1. Load the CDN scripts
+    await loadScriptOnce('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js');
+    await loadScriptOnce('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js');
+    
     const { FFmpeg } = window.FFmpegWASM;
     const { toBlobURL } = window.FFmpegUtil;
     const ffmpeg = new FFmpeg();
 
-async function loadFfmpeg() {
-    if (!ffmpeg) {
-        ffmpeg = new FFmpeg();
-        
-        ffmpeg.on('log', ({ message }) => {
-            console.log(message);
-        });
+    const CORE_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+    const FFMPEG_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
 
-        // The core library
-        const CORE_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-        // The ffmpeg package (matching the version in your error message)
-        const FFMPEG_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
-
-        await ffmpeg.load({
-            coreURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
-            wasmURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
-            
-            // This is the missing piece that bypasses the cross-origin worker crash:
-            classWorkerURL: await toBlobURL(`${FFMPEG_BASE}/814.ffmpeg.js`, 'text/javascript')
-        });
-    }
-}
+    // 2. Load the core and the worker as local blobs to bypass GitHub Pages security
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
+      classWorkerURL: await toBlobURL(`${FFMPEG_BASE}/814.ffmpeg.js`, 'text/javascript')
+    });
 
     ffmpegInstance = ffmpeg;
     return ffmpeg;
@@ -966,7 +952,7 @@ async function loadFfmpeg() {
         '-vf', `select='${selectExpr}',setpts=N/FRAME_RATE/TB`,
         '-c:v', 'libx264',
         '-crf', '0',
-        '-preset', 'slower',
+        '-preset', 'ultrafast',
         '-tune', 'grain',
         '-pix_fmt', 'yuv420p',
         '-an',
