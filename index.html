@@ -792,13 +792,11 @@
     const { toBlobURL } = window.FFmpegUtil;
     const ffmpeg = new FFmpeg();
 
-    const coreURL = await toBlobURL(FFMPEG_CORE_BASE + '/ffmpeg-core.js', 'text/javascript');
-    const wasmURL = await toBlobURL(FFMPEG_CORE_BASE + '/ffmpeg-core.wasm', 'application/wasm');
-
+const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+    
     await ffmpeg.load({
-      coreURL,
-      wasmURL,
-      classWorkerURL: 'data:text/javascript;base64,' + btoa(`importScripts("${coreURL}");`)
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
     });
 
     ffmpegInstance = ffmpeg;
