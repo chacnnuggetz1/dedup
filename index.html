@@ -792,12 +792,28 @@
     const { toBlobURL } = window.FFmpegUtil;
     const ffmpeg = new FFmpeg();
 
-const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-    
-    await ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
-    });
+async function loadFfmpeg() {
+    if (!ffmpeg) {
+        ffmpeg = new FFmpeg();
+        
+        ffmpeg.on('log', ({ message }) => {
+            console.log(message);
+        });
+
+        // The core library
+        const CORE_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+        // The ffmpeg package (matching the version in your error message)
+        const FFMPEG_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
+
+        await ffmpeg.load({
+            coreURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
+            wasmURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
+            
+            // This is the missing piece that bypasses the cross-origin worker crash:
+            classWorkerURL: await toBlobURL(`${FFMPEG_BASE}/814.ffmpeg.js`, 'text/javascript')
+        });
+    }
+}
 
     ffmpegInstance = ffmpeg;
     return ffmpeg;
