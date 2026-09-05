@@ -1,0 +1,993 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Frame Dedupe</title>
+<style>
+  @font-face {
+    font-family: 'PlexMono';
+    src: local('IBM Plex Mono');
+  }
+  :root{
+    --bg: #15171a;
+    --bg-raised: #1d2024;
+    --bg-inset: #101214;
+    --line: #2c3036;
+    --text: #e7e5df;
+    --text-dim: #8b9098;
+    --accent: #e8a33d;
+    --accent-dim: #6b4f22;
+    --danger: #c65b4e;
+    --focus: #6fb3d2;
+    --radius: 6px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+  }
+  .mono { font-family: 'PlexMono', 'SFMono-Regular', Consolas, Menlo, monospace; }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-raised);
+    flex-wrap: wrap;
+  }
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    margin: 0;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  header .tally {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--text-dim);
+    flex: none;
+  }
+  header .tally.live { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+
+  .fps-field {
+    display: flex; align-items: center; gap: 6px;
+    margin-left: auto;
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+  .fps-field input {
+    width: 54px;
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 4px 6px;
+    font-size: 13px;
+    font-family: 'PlexMono', monospace;
+  }
+  .file-btn {
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    color: var(--text);
+    padding: 7px 12px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .file-btn:hover { border-color: var(--text-dim); }
+  #fileInput { display: none; }
+
+  main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .stage {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-inset);
+    position: relative;
+    overflow: hidden;
+  }
+  .stage video {
+    max-width: 100%;
+    max-height: 100%;
+    display: block;
+  }
+  .empty-state {
+    color: var(--text-dim);
+    text-align: center;
+    padding: 40px;
+    max-width: 360px;
+    line-height: 1.5;
+    font-size: 14px;
+  }
+  .empty-state .drop {
+    border: 1px dashed var(--line);
+    border-radius: var(--radius);
+    padding: 28px 20px;
+    cursor: pointer;
+  }
+  .empty-state .drop:hover { border-color: var(--accent); }
+
+  .frame-badge {
+    position: absolute;
+    top: 10px; left: 10px;
+    background: rgba(16,18,20,0.75);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 5px 10px;
+    font-size: 12px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .frame-badge .kept-flag {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .frame-badge .kept-flag.off { color: var(--text-dim); font-weight: 400; }
+
+  .timeline-wrap {
+    padding: 8px 12px 6px;
+    background: var(--bg-raised);
+    border-top: 1px solid var(--line);
+  }
+  .timeline-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  .timeline-container {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  .timeline-canvas-wrapper {
+    flex: 1;
+    position: relative;
+  }
+  canvas#timeline {
+    width: 100%;
+    height: 64px;
+    display: block;
+    border-radius: 4px;
+    cursor: pointer;
+    touch-action: pan-x;
+  }
+
+  .timeline-side-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 90px;
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 6px;
+    align-items: center;
+  }
+  .timeline-side-panel label {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .timeline-side-panel input[type=range] {
+    width: 100%;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  .controls {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    background: var(--bg-raised);
+    border-top: 1px solid var(--line);
+  }
+  .controls button {
+    flex: 1;
+    border: 1px solid var(--line);
+    background: var(--bg-inset);
+    color: var(--text);
+    border-radius: var(--radius);
+    font-size: 14px;
+    padding: 14px 8px;
+    min-height: 56px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .controls button:active { background: var(--line); }
+  .controls button:disabled { opacity: 0.35; cursor: not-allowed; }
+  .controls button .glyph { font-size: 20px; line-height: 1; }
+  .controls button .label { font-size: 10px; color: var(--text-dim); }
+
+  .controls button.nav { flex: 0.8; }
+  .controls button.play { flex: 0.8; border-color: var(--focus); }
+  .controls button.keep {
+    flex: 1.6;
+    border-color: var(--accent-dim);
+  }
+  .controls button.keep.on {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #1a1305;
+  }
+  .controls button.keep.on .label { color: #4a380f; }
+
+  .bottom-row {
+    display: flex;
+    gap: 8px;
+    padding: 0 12px calc(10px + env(safe-area-inset-bottom));
+    background: var(--bg-raised);
+  }
+  .bottom-row button {
+    flex: 1;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--text-dim);
+    border-radius: var(--radius);
+    padding: 9px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .bottom-row button.clean {
+    color: #1a1305;
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .bottom-row button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  .overlay {
+    position: fixed; inset: 0;
+    background: rgba(10,11,13,0.92);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    padding: 24px;
+  }
+  .overlay.show { display: flex; }
+  .overlay-card {
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 24px;
+    width: 100%;
+    max-width: 420px;
+    text-align: center;
+  }
+  .overlay-card h2 { margin: 0 0 6px; font-size: 16px; }
+  .overlay-card p { margin: 0 0 16px; color: var(--text-dim); font-size: 13px; }
+  .progress-count { font-size: 12px; color: var(--text-dim); margin-bottom: 18px; word-break: break-word; }
+  .overlay-card video { width: 100%; border-radius: 6px; margin-bottom: 14px; background: #000; }
+  .result-actions { display: flex; gap: 8px; }
+  .result-actions a, .result-actions button {
+    flex: 1;
+    padding: 11px;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+    background: var(--bg-inset);
+    color: var(--text);
+    text-decoration: none;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .result-actions a.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #1a1305;
+    font-weight: 600;
+  }
+
+  @media (min-width: 720px) {
+    .controls button { min-height: 64px; font-size: 15px; }
+    .controls button .glyph { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="tally" id="tally"></span>
+  <h1>Frame Dedupe</h1>
+  <button class="file-btn" id="pickFileBtn">Upload video</button>
+  <input type="file" id="fileInput" accept="video/*">
+  <div class="fps-field">
+    <span id="fpsStatus" class="mono">fps</span>
+    <input type="number" id="fpsInput" value="30" min="1" max="120" step="0.01">
+  </div>
+</header>
+
+<main>
+  <div class="stage" id="stage">
+    <div class="empty-state" id="emptyState">
+      <div class="drop" id="dropZone">
+        Drop a video here, or use "Upload video" above.<br><br>
+        Frame rate is detected automatically once it loads.
+      </div>
+    </div>
+    <video id="video" playsinline muted style="display:none"></video>
+    <div class="frame-badge" id="frameBadge" style="display:none">
+      <span class="mono" id="frameCounter">0 / 0</span>
+      <span class="kept-flag off" id="keptFlag">skip</span>
+    </div>
+    <div class="frame-badge" id="statusBadge" style="display:none">
+      <span class="mono" id="statusText">Loading…</span>
+    </div>
+  </div>
+
+  <div class="timeline-wrap" id="timelineWrap" style="display:none">
+    <div class="timeline-meta">
+      <span id="keptCount">0 kept</span>
+      <span id="totalDuration">0:00</span>
+    </div>
+    <div class="timeline-container">
+      <div class="timeline-canvas-wrapper">
+        <canvas id="timeline"></canvas>
+      </div>
+      <div class="timeline-side-panel">
+        <label>Zoom</label>
+        <input type="range" id="zoomSlider" min="1" max="20" value="1" step="0.1">
+      </div>
+    </div>
+  </div>
+
+  <div class="controls" id="controls" style="display:none">
+    <button class="nav" id="prevBtn"><span class="glyph">&#8592;</span><span class="label">prev</span></button>
+    <button class="play" id="playBtn"><span class="glyph" id="playGlyph">&#9654;</span><span class="label" id="playLabel">play</span></button>
+    <button class="keep" id="keepBtn"><span class="glyph">&#9679;</span><span class="label">keep frame</span></button>
+    <button class="nav" id="nextBtn"><span class="glyph">&#8594;</span><span class="label">next</span></button>
+  </div>
+  <div class="bottom-row" id="bottomRow" style="display:none">
+    <button id="resetBtn">Clear marks</button>
+    <button class="clean" id="cleanBtn">Clean &rarr; export</button>
+  </div>
+</main>
+
+<div class="overlay" id="overlay">
+  <div class="overlay-card">
+    <div id="renderState">
+      <h2>Rendering clean video</h2>
+      <p id="renderSub">Exporting with FFmpeg engine...</p>
+      <div class="progress-count mono" id="progressCount">Initializing...</div>
+      <div class="result-actions">
+        <button id="cancelRenderBtn">Cancel</button>
+      </div>
+    </div>
+    <div id="resultState" style="display:none">
+      <h2>Done</h2>
+      <p id="resultSub"></p>
+      <video id="resultVideo" controls></video>
+      <div class="result-actions">
+        <button id="closeResultBtn">Close</button>
+        <a class="primary" id="downloadLink" download="clean.mp4">Download</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  const video = document.getElementById('video');
+  const fileInput = document.getElementById('fileInput');
+  const pickFileBtn = document.getElementById('pickFileBtn');
+  const dropZone = document.getElementById('dropZone');
+  const emptyState = document.getElementById('emptyState');
+  const fpsInput = document.getElementById('fpsInput');
+  const tally = document.getElementById('tally');
+
+  const frameBadge = document.getElementById('frameBadge');
+  const frameCounter = document.getElementById('frameCounter');
+  const keptFlag = document.getElementById('keptFlag');
+  const statusBadge = document.getElementById('statusBadge');
+  const statusText = document.getElementById('statusText');
+  const fpsStatus = document.getElementById('fpsStatus');
+
+  const timelineWrap = document.getElementById('timelineWrap');
+  const timelineCanvas = document.getElementById('timeline');
+  const tlCtx = timelineCanvas.getContext('2d');
+  const zoomSlider = document.getElementById('zoomSlider');
+  const keptCountEl = document.getElementById('keptCount');
+  const totalDurationEl = document.getElementById('totalDuration');
+
+  const controls = document.getElementById('controls');
+  const bottomRow = document.getElementById('bottomRow');
+  const prevBtn = document.getElementById('prevBtn');
+  const nextBtn = document.getElementById('nextBtn');
+  const playBtn = document.getElementById('playBtn');
+  const playGlyph = document.getElementById('playGlyph');
+  const playLabel = document.getElementById('playLabel');
+  const keepBtn = document.getElementById('keepBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const cleanBtn = document.getElementById('cleanBtn');
+
+  const overlay = document.getElementById('overlay');
+  const renderState = document.getElementById('renderState');
+  const resultState = document.getElementById('resultState');
+  const progressCount = document.getElementById('progressCount');
+  const cancelRenderBtn = document.getElementById('cancelRenderBtn');
+  const closeResultBtn = document.getElementById('closeResultBtn');
+  const downloadLink = document.getElementById('downloadLink');
+  const resultVideo = document.getElementById('resultVideo');
+  const resultSub = document.getElementById('resultSub');
+
+  let fps = 30;
+  let totalFrames = 0;
+  let duration = 0;
+  let currentFrame = 0;
+  let kept = null;
+  let videoLoaded = false;
+  let rendering = false;
+  let loadedRawFile = null;
+  let isPlaying = false;
+  let playAnimFrame = null;
+  let zoomLevel = 1.0;
+
+  function fmtTime(s){
+    if (!isFinite(s)) return '0:00';
+    const m = Math.floor(s/60);
+    const sec = Math.floor(s%60).toString().padStart(2,'0');
+    return m + ':' + sec;
+  }
+
+  function frameTime(idx){
+    return Math.min(idx / fps + (0.5/fps), Math.max(duration - 0.001, 0));
+  }
+
+  function seekTo(time){
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        video.removeEventListener('seeked', onSeeked);
+        resolve();
+      };
+      const onSeeked = () => finish();
+      video.addEventListener('seeked', onSeeked);
+      video.currentTime = time;
+      setTimeout(finish, 700);
+    });
+  }
+
+  async function goToFrame(idx, updatePreview = true){
+    if (isPlaying) pauseVideo();
+    idx = Math.max(0, Math.min(totalFrames - 1, idx));
+    currentFrame = idx;
+    if (updatePreview) await seekTo(frameTime(idx));
+    renderFrameUI();
+  }
+
+  function updateFrameFromTime(){
+    if (!videoLoaded) return;
+    const computed = Math.min(totalFrames - 1, Math.floor(video.currentTime * fps));
+    if (computed !== currentFrame) {
+      currentFrame = computed;
+      renderFrameUI();
+    }
+    if (isPlaying) {
+      if (video.ended || video.currentTime >= duration - 0.05) {
+        pauseVideo();
+      } else {
+        playAnimFrame = requestAnimationFrame(updateFrameFromTime);
+      }
+    }
+  }
+
+  function togglePlay(){
+    if (!videoLoaded || rendering) return;
+    if (isPlaying) {
+      pauseVideo();
+    } else {
+      startPlay();
+    }
+  }
+
+  function startPlay(){
+    if (currentFrame >= totalFrames - 1) {
+      video.currentTime = 0;
+      currentFrame = 0;
+    }
+    isPlaying = true;
+    playGlyph.innerHTML = '&#10074;&#10074;';
+    playLabel.textContent = 'pause';
+    video.play();
+    playAnimFrame = requestAnimationFrame(updateFrameFromTime);
+  }
+
+  function pauseVideo(){
+    isPlaying = false;
+    if (playAnimFrame) cancelAnimationFrame(playAnimFrame);
+    playGlyph.innerHTML = '&#9654;';
+    playLabel.textContent = 'play';
+    video.pause();
+    currentFrame = Math.min(totalFrames - 1, Math.floor(video.currentTime * fps));
+    renderFrameUI();
+  }
+
+  function renderFrameUI(){
+    frameCounter.textContent = (currentFrame + 1) + ' / ' + totalFrames;
+    const isKept = kept[currentFrame] === 1;
+    keptFlag.textContent = isKept ? 'keep' : 'skip';
+    keptFlag.classList.toggle('off', !isKept);
+    keepBtn.classList.toggle('on', isKept);
+    keptCountEl.textContent = countKept() + ' kept';
+    drawTimeline();
+  }
+
+  function countKept(){
+    let c = 0;
+    for (let i=0;i<kept.length;i++) if (kept[i]===1) c++;
+    return c;
+  }
+
+  function toggleKeep(){
+    kept[currentFrame] = kept[currentFrame] === 1 ? 0 : 1;
+    renderFrameUI();
+  }
+
+  function drawTimeline(){
+    const w = timelineCanvas.clientWidth;
+    const h = timelineCanvas.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    if (timelineCanvas.width !== Math.round(w*dpr) || timelineCanvas.height !== Math.round(h*dpr)) {
+      timelineCanvas.width = Math.round(w*dpr);
+      timelineCanvas.height = Math.round(h*dpr);
+    }
+    tlCtx.setTransform(dpr,0,0,dpr,0,0);
+    tlCtx.fillStyle = '#101214';
+    tlCtx.fillRect(0,0,w,h);
+
+    if (totalFrames === 0) return;
+
+    const visibleFrameCount = totalFrames / zoomLevel;
+    let startFrame = currentFrame - (visibleFrameCount / 2);
+    if (startFrame < 0) startFrame = 0;
+    if (startFrame + visibleFrameCount > totalFrames) startFrame = Math.max(0, totalFrames - visibleFrameCount);
+    const endFrame = Math.min(totalFrames, startFrame + visibleFrameCount);
+
+    const frameToX = (f) => ((f - startFrame) / visibleFrameCount) * w;
+
+    const startSec = Math.floor(startFrame / fps);
+    const endSec = Math.ceil(endFrame / fps);
+    tlCtx.fillStyle = '#8b9098';
+    tlCtx.font = '10px PlexMono, monospace';
+    tlCtx.textAlign = 'center';
+
+    for (let s = startSec; s <= endSec; s++) {
+      const fIdx = s * fps;
+      if (fIdx >= startFrame && fIdx <= endFrame) {
+        const x = frameToX(fIdx);
+        tlCtx.fillRect(x, 0, 1, 6);
+        tlCtx.fillText(fmtTime(s), x, 16);
+      }
+    }
+
+    const trackTop = 22;
+    const trackHeight = h - trackTop;
+    const framesPerPixel = visibleFrameCount / w;
+
+    for (let x=0; x<w; x++){
+      const fStart = Math.floor(startFrame + (x * framesPerPixel));
+      const fEnd = Math.max(fStart + 1, Math.floor(startFrame + ((x + 1) * framesPerPixel)));
+      let anyKept = false;
+      for (let i = fStart; i < fEnd && i < totalFrames; i++){
+        if (kept[i] === 1){ anyKept = true; break; }
+      }
+      tlCtx.fillStyle = anyKept ? '#e8a33d' : '#2c3036';
+      tlCtx.fillRect(x, trackTop + (trackHeight * 0.2), 1, trackHeight * 0.6);
+    }
+
+    const px = frameToX(currentFrame);
+    tlCtx.fillStyle = '#6fb3d2';
+    tlCtx.fillRect(Math.max(0, px - 1), trackTop, 2, trackHeight);
+  }
+
+  zoomSlider.addEventListener('input', (e) => {
+    zoomLevel = parseFloat(e.target.value);
+    drawTimeline();
+  });
+
+  function handleKey(e){
+    if (!videoLoaded || rendering) return;
+    const tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT') return;
+    if (e.code === 'ArrowRight'){ e.preventDefault(); goToFrame(currentFrame+1); }
+    else if (e.code === 'ArrowLeft'){ e.preventDefault(); goToFrame(currentFrame-1); }
+    else if (e.code === 'Space'){ e.preventDefault(); toggleKeep(); }
+    else if (e.code === 'KeyP'){ e.preventDefault(); togglePlay(); }
+  }
+  document.addEventListener('keydown', handleKey);
+
+  prevBtn.addEventListener('click', () => goToFrame(currentFrame-1));
+  nextBtn.addEventListener('click', () => goToFrame(currentFrame+1));
+  playBtn.addEventListener('click', togglePlay);
+  keepBtn.addEventListener('click', toggleKeep);
+  resetBtn.addEventListener('click', () => {
+    if (!confirm('Clear all keep marks?')) return;
+    kept.fill(0);
+    renderFrameUI();
+  });
+
+  let scrubbing = false;
+  function timelineToFrame(clientX){
+    const rect = timelineCanvas.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const visibleFrameCount = totalFrames / zoomLevel;
+    let startFrame = currentFrame - (visibleFrameCount / 2);
+    if (startFrame < 0) startFrame = 0;
+    if (startFrame + visibleFrameCount > totalFrames) startFrame = Math.max(0, totalFrames - visibleFrameCount);
+    return Math.round(startFrame + (ratio * visibleFrameCount));
+  }
+
+  timelineCanvas.addEventListener('pointerdown', (e) => {
+    if (!videoLoaded) return;
+    scrubbing = true;
+    goToFrame(timelineToFrame(e.clientX));
+  });
+  timelineCanvas.addEventListener('pointermove', (e) => {
+    if (!scrubbing) return;
+    goToFrame(timelineToFrame(e.clientX));
+  });
+  window.addEventListener('pointerup', () => scrubbing = false);
+
+  const STANDARD_FPS = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 119.88, 120];
+
+  function snapToStandardFps(raw){
+    let best = raw, bestDiff = Infinity;
+    for (const f of STANDARD_FPS){
+      const diff = Math.abs(f - raw);
+      if (diff < bestDiff){ bestDiff = diff; best = f; }
+    }
+    return (bestDiff / raw) < 0.02 ? best : raw;
+  }
+
+  function detectFps(){
+    return new Promise((resolvePromise) => {
+      if (typeof video.requestVideoFrameCallback !== 'function'){
+        resolvePromise(null);
+        return;
+      }
+      const samples = [];
+      let cbId = null;
+      let settled = false;
+      const safetyTimeout = setTimeout(() => finish(computeFromSamples(5)), 2500);
+
+      function computeFromSamples(minSamples){
+        if (samples.length < minSamples) return null;
+        const elapsed = samples[samples.length-1] - samples[0];
+        return elapsed > 0 ? snapToStandardFps((samples.length-1)/elapsed) : null;
+      }
+      function finish(result){
+        if (settled) return;
+        settled = true;
+        clearTimeout(safetyTimeout);
+        if (cbId !== null){
+          try { video.cancelVideoFrameCallback(cbId); } catch(e){}
+        }
+        video.pause();
+        resolvePromise(result);
+      }
+      function onFrame(now, metadata){
+        samples.push(metadata.mediaTime);
+        if (samples.length >= 40){
+          finish(computeFromSamples(2));
+          return;
+        }
+        cbId = video.requestVideoFrameCallback(onFrame);
+      }
+
+      video.muted = true;
+      video.currentTime = 0;
+      video.play().then(() => {
+        cbId = video.requestVideoFrameCallback(onFrame);
+      }).catch(() => finish(null));
+    });
+  }
+
+  function buildFrameTable(detectedFps){
+    fps = detectedFps;
+    duration = video.duration;
+    totalFrames = Math.max(1, Math.floor(duration * fps));
+    kept = new Uint8Array(totalFrames);
+    videoLoaded = true;
+    video.pause();
+    fpsInput.value = (Math.round(fps * 100) / 100);
+    timelineWrap.style.display = 'block';
+    controls.style.display = 'flex';
+    bottomRow.style.display = 'flex';
+    totalDurationEl.textContent = fmtTime(duration) + ' · ' + totalFrames + ' frames @ ' + fps.toFixed(2) + 'fps';
+    tally.classList.add('live');
+  }
+
+  let activeObjectUrl = null;
+
+  function tryLoadVideo(fileOrBlob){
+    return new Promise((resolve, reject) => {
+      const codeNames = {1:'ABORTED', 2:'NETWORK', 3:'DECODE', 4:'SRC_NOT_SUPPORTED'};
+      const url = URL.createObjectURL(fileOrBlob);
+
+      function cleanup(){
+        video.removeEventListener('error', onError);
+        video.removeEventListener('loadedmetadata', onMeta);
+      }
+      function onError(){
+        cleanup();
+        URL.revokeObjectURL(url);
+        const err = video.error;
+        const code = err ? err.code : 0;
+        reject(new Error((codeNames[code] || 'unknown') + (err && err.message ? ': ' + err.message : '')));
+      }
+      function onMeta(){
+        cleanup();
+        if (!video.videoWidth || !video.videoHeight){
+          URL.revokeObjectURL(url);
+          reject(new Error('no decodable video track'));
+          return;
+        }
+        resolve(url);
+      }
+      video.addEventListener('error', onError, { once: true });
+      video.addEventListener('loadedmetadata', onMeta, { once: true });
+      video.removeAttribute('src');
+      video.src = url;
+    });
+  }
+
+  const FFMPEG_JS_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js';
+  const FFMPEG_UTIL_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js';
+  const FFMPEG_CORE_BASE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+
+  const _scriptCache = {};
+  function loadScriptOnce(src){
+    if (_scriptCache[src]) return _scriptCache[src];
+    _scriptCache[src] = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('could not fetch ' + src));
+      document.head.appendChild(s);
+    });
+    return _scriptCache[src];
+  }
+
+  let ffmpegInstance = null;
+  async function ensureFfmpeg(onStatus){
+    if (ffmpegInstance) return ffmpegInstance;
+    onStatus('Loading FFmpeg engine…');
+    await loadScriptOnce(FFMPEG_JS_URL);
+    await loadScriptOnce(FFMPEG_UTIL_URL);
+    const { FFmpeg } = window.FFmpegWASM;
+    const { toBlobURL } = window.FFmpegUtil;
+    const ffmpeg = new FFmpeg();
+
+    const coreURL = await toBlobURL(FFMPEG_CORE_BASE + '/ffmpeg-core.js', 'text/javascript');
+    const wasmURL = await toBlobURL(FFMPEG_CORE_BASE + '/ffmpeg-core.wasm', 'application/wasm');
+
+    await ffmpeg.load({
+      coreURL,
+      wasmURL,
+      classWorkerURL: 'data:text/javascript;base64,' + btoa(`importScripts("${coreURL}");`)
+    });
+
+    ffmpegInstance = ffmpeg;
+    return ffmpeg;
+  }
+
+  function extOf(name){
+    const m = /\.[a-zA-Z0-9]+$/.exec(name || '');
+    return m ? m[0] : '.mp4';
+  }
+
+  async function repairContainer(file){
+    const ffmpeg = await ensureFfmpeg((msg) => { statusText.textContent = msg; });
+    const { fetchFile } = window.FFmpegUtil;
+
+    const onProgress = ({ progress }) => {
+      const pct = Math.max(0, Math.min(100, Math.round((progress || 0) * 100)));
+      statusText.textContent = 'Repairing container… ' + pct + '%';
+    };
+    ffmpeg.on('progress', onProgress);
+    statusText.textContent = 'Repairing container…';
+
+    const inputName = 'input' + extOf(file.name);
+    try {
+      await ffmpeg.writeFile(inputName, await fetchFile(file));
+      await ffmpeg.exec(['-i', inputName, '-c', 'copy', '-movflags', '+faststart', 'output.mp4']);
+      const data = await ffmpeg.readFile('output.mp4');
+      return new Blob([data.buffer], { type: 'video/mp4' });
+    } finally {
+      ffmpeg.off('progress', onProgress);
+      try { await ffmpeg.deleteFile(inputName); } catch(e){}
+      try { await ffmpeg.deleteFile('output.mp4'); } catch(e){}
+    }
+  }
+
+  async function postLoadPipeline(){
+    try { await video.play(); video.pause(); } catch(e){}
+    video.currentTime = 0;
+
+    statusText.textContent = 'Detecting frame rate…';
+    fpsStatus.textContent = 'detecting…';
+    let detected = await detectFps();
+    if (!detected){
+      detected = Math.max(1, Math.min(120, parseFloat(fpsInput.value) || 30));
+      fpsStatus.textContent = 'fps (manual)';
+    } else {
+      fpsStatus.textContent = 'fps (detected)';
+    }
+
+    buildFrameTable(detected);
+    statusBadge.style.display = 'none';
+    frameBadge.style.display = 'flex';
+    await goToFrame(0);
+  }
+
+  async function loadFile(file){
+    if (!file) return;
+    loadedRawFile = file;
+    videoLoaded = false;
+    if (isPlaying) pauseVideo();
+    if (activeObjectUrl){ URL.revokeObjectURL(activeObjectUrl); activeObjectUrl = null; }
+
+    video.style.display = 'block';
+    emptyState.style.display = 'none';
+    frameBadge.style.display = 'none';
+    statusBadge.style.display = 'flex';
+    statusText.textContent = 'Loading video…';
+    fpsStatus.textContent = 'fps';
+
+    let nativeError = null;
+    try {
+      activeObjectUrl = await tryLoadVideo(file);
+    } catch (err){
+      nativeError = err;
+    }
+
+    if (nativeError){
+      statusText.textContent = 'Native playback failed — attempting automatic repair…';
+      try {
+        const repaired = await repairContainer(file);
+        activeObjectUrl = await tryLoadVideo(repaired);
+      } catch (repairErr){
+        statusText.textContent = 'Could not load this file.';
+        alert('This video could not be played.');
+        return;
+      }
+    }
+
+    await postLoadPipeline();
+  }
+
+  fpsInput.addEventListener('change', async () => {
+    if (!videoLoaded) return;
+    const val = Math.max(1, Math.min(120, parseFloat(fpsInput.value) || fps));
+    if (Math.abs(val - fps) < 0.001) return;
+    if (!confirm('Changing the frame rate rebuilds the frame list and clears your keep marks. Continue?')){
+      fpsInput.value = fps.toFixed(2);
+      return;
+    }
+    fpsStatus.textContent = 'fps (manual)';
+    buildFrameTable(val);
+    await goToFrame(0);
+  });
+
+  pickFileBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', (e) => loadFile(e.target.files[0]));
+  dropZone.addEventListener('click', () => fileInput.click());
+  ['dragover','drop'].forEach(evt => {
+    document.addEventListener(evt, (e) => e.preventDefault());
+  });
+  document.addEventListener('drop', (e) => {
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) loadFile(f);
+  });
+
+  window.addEventListener('resize', drawTimeline);
+
+  async function runClean() {
+    if (isPlaying) pauseVideo();
+    const indices = [];
+    for (let i = 0; i < kept.length; i++) if (kept[i] === 1) indices.push(i);
+    if (indices.length === 0) {
+      alert('No frames marked "keep". Step through and select frames first.');
+      return;
+    }
+
+    if (!loadedRawFile) {
+      alert('Original video file reference lost. Reload the file.');
+      return;
+    }
+
+    rendering = true;
+    overlay.classList.add('show');
+    renderState.style.display = 'block';
+    resultState.style.display = 'none';
+    progressCount.textContent = 'Initializing engine...';
+
+    try {
+      const ffmpeg = await ensureFfmpeg((msg) => { progressCount.textContent = msg; });
+      const { fetchFile } = window.FFmpegUtil;
+
+      const inputName = 'input' + extOf(loadedRawFile.name);
+      await ffmpeg.writeFile(inputName, await fetchFile(loadedRawFile));
+
+      const selectExpr = indices.map(idx => `eq(n\\,${idx})`).join('+');
+      
+      progressCount.textContent = 'Rendering lossless video...';
+
+      await ffmpeg.exec([
+        '-i', inputName,
+        '-vf', `select='${selectExpr}',setpts=N/FRAME_RATE/TB`,
+        '-c:v', 'libx264',
+        '-crf', '0',
+        '-preset', 'slower',
+        '-tune', 'grain',
+        '-pix_fmt', 'yuv420p',
+        '-an',
+        'clean_output.mp4'
+      ]);
+
+      const data = await ffmpeg.readFile('clean_output.mp4');
+      const blob = new Blob([data.buffer], { type: 'video/mp4' });
+      const url = URL.createObjectURL(blob);
+
+      resultVideo.src = url;
+      downloadLink.href = url;
+      downloadLink.download = 'clean.mp4';
+      
+      const sizeMb = (blob.size / (1024 * 1024)).toFixed(1);
+      resultSub.textContent = indices.length + ' frames, ' + fmtTime(indices.length / fps) + ', ' + sizeMb + ' MB (lossless h.264)';
+      
+      renderState.style.display = 'none';
+      resultState.style.display = 'block';
+
+      try { await ffmpeg.deleteFile(inputName); } catch(e){}
+      try { await ffmpeg.deleteFile('clean_output.mp4'); } catch(e){}
+    } catch (err) {
+      alert('Export failed: ' + err.message);
+      overlay.classList.remove('show');
+    } finally {
+      rendering = false;
+    }
+  }
+
+  cleanBtn.addEventListener('click', runClean);
+  cancelRenderBtn.addEventListener('click', () => { overlay.classList.remove('show'); rendering = false; });
+  closeResultBtn.addEventListener('click', () => overlay.classList.remove('show'));
+
+})();
+</script>
+</body>
+</html>
