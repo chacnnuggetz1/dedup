@@ -1294,8 +1294,7 @@
         '-vf', `select=${selectExpr},setpts=N/FRAME_RATE/TB`,
         '-c:v', 'libx264',
         '-crf', '17',
-        '-preset', 'fast',
-        '-tune', 'animation',
+        '-preset', 'ultrafast',
         '-pix_fmt', 'yuv420p',
         '-an',
         'clean_output.mp4'
