@@ -940,16 +940,21 @@
       const ffmpeg = await ensureFfmpeg((msg) => { progressCount.textContent = msg; });
       const { fetchFile } = window.FFmpegUtil;
 
+      // Pipe FFmpeg's internal logs directly to your browser console (F12) for debugging
+      ffmpeg.on('log', ({ message }) => console.log(message));
+
       const inputName = 'input' + extOf(loadedRawFile.name);
       await ffmpeg.writeFile(inputName, await fetchFile(loadedRawFile));
 
+      // FIX: Removed the single quotes. We pass the expression completely raw.
       const selectExpr = indices.map(idx => `eq(n\\,${idx})`).join('+');
       
       progressCount.textContent = 'Rendering lossless video...';
 
-      await ffmpeg.exec([
+      // Capture the exit code so we know if it actually finishes
+      const exitCode = await ffmpeg.exec([
         '-i', inputName,
-        '-vf', `select='${selectExpr}',setpts=N/FRAME_RATE/TB`,
+        '-vf', `select=${selectExpr},setpts=N/FRAME_RATE/TB`,
         '-c:v', 'libx264',
         '-crf', '0',
         '-preset', 'ultrafast',
@@ -958,6 +963,10 @@
         '-an',
         'clean_output.mp4'
       ]);
+
+      if (exitCode !== 0) {
+        throw new Error(`FFmpeg crashed with exit code ${exitCode}. Press F12 and check the Console tab for the exact error.`);
+      }
 
       const data = await ffmpeg.readFile('clean_output.mp4');
       const blob = new Blob([data.buffer], { type: 'video/mp4' });
@@ -976,7 +985,9 @@
       try { await ffmpeg.deleteFile(inputName); } catch(e){}
       try { await ffmpeg.deleteFile('clean_output.mp4'); } catch(e){}
     } catch (err) {
-      alert('Export failed: ' + err.message);
+      // Safely handle errors even if they don't have a .message property
+      alert('Export failed: ' + (err.message || err));
+      console.error(err);
       overlay.classList.remove('show');
     } finally {
       rendering = false;
